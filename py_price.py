@@ -1,13 +1,28 @@
 import requests
 import time
+import os
+import threading
+from flask import Flask
 
 # --- CONFIGURACIÓN ---
 TOKEN = "8646256822:AAH4JQgFvhE6KnLzVDOpYdF6vGjql-w4Px4"
-CHAT_ID = 7873564562  # ID numérico
+CHAT_ID = 7873564562
 TASA_OBJETIVO = 655.50
-INTERVALO_MONITOR = 300  # 5 minutos para la alerta automática
+INTERVALO_MONITOR = 300
 
-# Variables de estado para el control de flujo
+# Servidor Web Simple para que Render no nos cobre
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot de Binance está vivo!"
+
+def run_web_server():
+    # Render usa el puerto 10000 por defecto o el que asigne en la variable PORT
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
+
+# --- LÓGICA DEL BOT ---
 ultimo_update_id = -1
 ultima_revision_automatica = 0
 
@@ -15,95 +30,56 @@ def enviar_telegram(mensaje):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
     try:
-        # Petición directa sin proxies
         requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"Error enviando a Telegram: {e}")
+    except: pass
 
 def obtener_precio_p2p():
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
-    
     def consultar(tipo):
         payload = {
-            "proMerchantAds": False, 
-            "page": 1, 
-            "rows": 10,
-            "publisherType": "merchant", 
-            "asset": "USDT",
-            "fiat": "VES", 
-            "tradeType": tipo
+            "proMerchantAds": False, "page": 1, "rows": 10,
+            "publisherType": "merchant", "asset": "USDT",
+            "fiat": "VES", "tradeType": tipo
         }
         try:
-            # Petición directa sin proxies
             r = requests.post(url, json=payload, timeout=10)
             data = r.json()
-            # Promediamos los primeros 5 anuncios
             precios = [float(a['adv']['price']) for a in data['data'][:5]]
             return sum(precios) / len(precios)
-        except Exception as e:
-            print(f"Error en Binance ({tipo}): {e}")
-            return None
-    
-    precio_venta = consultar("SELL")
-    precio_compra = consultar("BUY")
-    return precio_venta, precio_compra
+        except: return None
+    return consultar("SELL"), consultar("BUY")
 
 def revisar_mensajes():
     global ultimo_update_id
     url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
     params = {"offset": ultimo_update_id + 1, "timeout": 1}
-    
     try:
         r = requests.get(url, params=params, timeout=5)
-        updates = r.json().get("result", [])
-        
-        for update in updates:
+        for update in r.json().get("result", []):
             ultimo_update_id = update["update_id"]
             if "message" in update and "text" in update["message"]:
-                texto = update["message"]["text"]
-                sender_id = update["message"]["chat"]["id"]
+                if update["message"]["chat"]["id"] == CHAT_ID and update["message"]["text"] == "/price":
+                    v, c = obtener_precio_p2p()
+                    if v and c:
+                        enviar_telegram(f"📊 *Precio:* {(v+c)/2:.2f} Bs\nV: {v:.2f} | C: {c:.2f}")
+    except: pass
 
-                # Verificamos que seas tú quien escribe
-                if sender_id == CHAT_ID:
-                    if texto == "/price":
-                        print("📝 Comando /price recibido")
-                        v, c = obtener_precio_p2p()
-                        if v and c:
-                            prom = (v + c) / 2
-                            enviar_telegram(f"📊 *Consulta Manual*\n\n*Promedio:* {prom:.2f} Bs\n*Venta:* {v:.2f}\n*Compra:* {c:.2f}")
-                        else:
-                            enviar_telegram("❌ No se pudo obtener el precio de Binance.")
-    except Exception as e:
-        print(f"Error revisando Telegram: {e}")
-
-def monitor():
+def monitor_loop():
     global ultima_revision_automatica
-    print(f"🚀 Monitor LOCAL iniciado.")
-    print(f"🎯 Tasa objetivo: {TASA_OBJETIVO} Bs.")
-    print(f"📢 Intervalo de alerta: {INTERVALO_MONITOR} segundos.")
-    
-    enviar_telegram("🤖 *Bot Online (Local)*\nUsa `/price` para consultar.")
-
+    enviar_telegram("🚀 Bot en Render (Web) Activado.")
     while True:
-        # 1. Revisar si hay mensajes nuevos (Comandos)
         revisar_mensajes()
-
-        # 2. Revisión automática programada
         ahora = time.time()
         if ahora - ultima_revision_automatica >= INTERVALO_MONITOR:
             v, c = obtener_precio_p2p()
-            
-            if v and c:
-                promedio = (v + c) / 2
-                print(f"[{time.strftime('%H:%M:%S')}] Check automático: {promedio:.2f} Bs")
-                
-                if promedio >= TASA_OBJETIVO:
-                    enviar_telegram(f"⚠️ *ALERTA DE TASA*\nEl promedio P2P ha alcanzado: **{promedio:.2f} Bs**")
-            
+            if v and c and ((v + c) / 2) >= TASA_OBJETIVO:
+                enviar_telegram(f"⚠️ *ALERTA:* {((v+c)/2):.2f} Bs")
             ultima_revision_automatica = ahora
-        
-        # Pausa de 1 segundo para no saturar el procesador
-        time.sleep(1)
+        time.sleep(2)
 
 if __name__ == "__main__":
-    monitor()
+    # Iniciamos el monitor en un hilo separado
+    t = threading.Thread(target=monitor_loop)
+    t.start()
+    # Iniciamos el servidor web (lo que Render quiere ver)
+    run_web_server()
